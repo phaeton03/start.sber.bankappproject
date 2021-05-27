@@ -1,0 +1,2 @@
+public class BankCard {
+}
