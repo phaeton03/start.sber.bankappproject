@@ -1,16 +1,30 @@
 package server;
 
+import com.company.bankapi.model.Bank;
+import com.company.bankapi.model.BankCard;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
-
-import java.io.IOException;
-import java.io.OutputStream;
-import java.io.UnsupportedEncodingException;
+import java.io.*;
+import java.math.BigDecimal;
 import java.net.URI;
-import java.net.URLDecoder;
+
 import java.util.*;
 
+/**
+ * Общий Класс содержащий внутренние классы для работы с HTTP запросами
+ * @author      Nikolay Nikolskiy
+ * @version     %I% %G%
+ * @since       1.0
+ */
 public class Handlers {
+    private static Bank bank = new Bank();
+
+    /**
+     * Внутренний класс отправляеи сообщение Server starts successfully if you see this message
+     * когда отправляешь запрос типа  "/"
+     */
     static class RoutHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
@@ -23,51 +37,131 @@ public class Handlers {
             os.close();
         }
     }
-    static class EchoGetHandler implements HttpHandler {
+
+    /**
+     * Внутренний класс для просмотра всех карт клиента
+     */
+    static class ClientsCardsListGetHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
             //parse request
-            Map<String, Object> parameters = new HashMap<>();
             URI requestedURI = exchange.getRequestURI();
-            String query = requestedURI.getRawQuery();
-            parseQueue(query, parameters);
+            String query = requestedURI.toString();
+            String pattern = "/cards/userID/\\d+";
+            long userID;
+            if(query.matches(pattern)) {
+                String[] queryArr = query.split("/");
+                userID = Long.parseLong(queryArr[queryArr.length - 1]);
+                List<BankCard> cards = bank.lookClientsCards(userID);
             //send response
-            String response = "";
-            for(String key : parameters.keySet())
-                response += key + " = " + parameters.get(key) + "\n";
-            exchange.sendResponseHeaders(200, response.length());
-            OutputStream os = exchange.getResponseBody();
-            os.write(response.toString().getBytes());
-            os.close();
-        }
-    }
-    public static void parseQueue(String query, Map<String, Object> parameteres) throws UnsupportedEncodingException {
-        if( query != null) {
-            String pairs [] = query.split("&");
-            for(String pair : pairs) {
-                String param[] = pair.split("=");
-                String key = null;
-                String value = null;
-                if(param.length > 0)
-                    key = URLDecoder.decode(param[0],System.getProperty("file.encoding"));
-                if(param.length > 1)
-                    value = URLDecoder.decode(param[1], System.getProperty("file.encoding"));
-            if(parameteres.containsKey(key)) {
-                    Object obj = parameteres.get(key);
-                    if(obj instanceof List<?>) {
-                        List<String> values = (List<String>) obj;
-                        values.add(value);
-                    } else if(obj instanceof String) {
-                        List<String> values = new ArrayList<>();
-                        values.add((String) obj);
-                        values.add(value);
-                        parameteres.put(key, values);
-                    }
+            ObjectMapper objectMapper = new ObjectMapper();
+            String cardsAsString = objectMapper.writeValueAsString(cards);
+            sendResponse(200, cardsAsString, exchange);
             } else {
-                parameteres.put(key, value);
-            }
+            sendResponse(404, "Invalid request in URL", exchange);
             }
         }
     }
 
+    /**
+     * Внутренний класс для проверки баланса по клиента по всем его счетам
+     */
+    static class BalanceStatusGetHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            //parse request
+            URI requestedURI = exchange.getRequestURI();
+            String query = requestedURI.toString();
+            String pattern = "/cards/balance/userID/\\d+";
+            long userID;
+            if(query.matches(pattern)) {
+                String[] queryArr = query.split("/");
+                userID = Long.parseLong(queryArr[queryArr.length - 1]);
+                Map<Long, BigDecimal> balance = bank.checkBalance(userID);
+                ObjectMapper objectMapper = new ObjectMapper();
+                String balanceAsString = objectMapper.writeValueAsString(balance);
+                sendResponse(200, balanceAsString, exchange);
+            } else {
+                sendResponse(404, "Invalid request in URL", exchange);
+            }
+        }
+    }
+
+    /**
+     * Внутренний класс для выпуска новой карты
+     */
+    static class CardIssuePostHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            URI requestedURI = exchange.getRequestURI();
+            String query = requestedURI.toString();
+            String pattern = "/cards/issue/";
+            if(query.matches(pattern)) {
+                ObjectMapper objectMapper = new ObjectMapper();
+                String response = readResponse(exchange);
+                Map<String, Long> params = objectMapper.readValue(response, new TypeReference<>() {});
+                for(Map.Entry<String, Long> entry : params.entrySet()) {
+                    bank.issueCard(entry.getKey(), entry.getValue());
+                }
+                sendResponse(200, response, exchange);
+           } else {
+                sendResponse(404, "Invalid request in URL", exchange);
+            }
+        }
+    }
+
+    /**
+     * Внутренний класс для пополнения счета по его номеру
+     */
+    static class DepositPostHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            URI requestedURI = exchange.getRequestURI();
+            String query = requestedURI.toString();
+            String pattern = "/cards/account/deposit/";
+            if(query.matches(pattern)) {
+                ObjectMapper objectMapper = new ObjectMapper();
+                String response = readResponse(exchange);
+                Map<Long, BigDecimal> params = objectMapper.readValue(response, new TypeReference<Map<Long, BigDecimal>>() {});
+                for(Map.Entry<Long, BigDecimal> entry : params.entrySet()) {
+                    bank.deposit(entry.getKey(), entry.getValue());
+                }
+                sendResponse(200, response, exchange);
+            } else {
+                sendResponse(404, "Invalid request in URL", exchange);
+            }
+        }
+    }
+
+    /**
+     * Вспомогательный Метод для чтения HTTP response
+     * @param exchange
+     * @return - String
+     * @throws IOException
+     */
+    private static String readResponse(HttpExchange exchange) throws IOException {
+        InputStreamReader isr = new InputStreamReader(exchange.getRequestBody());
+        BufferedReader br = new BufferedReader(isr);
+        StringBuilder responseBuilder = new StringBuilder();
+        String inputStr;
+        while((inputStr = br.readLine()) != null) {
+            responseBuilder.append(inputStr);
+        }
+        return new String(responseBuilder);
+    }
+
+    /**
+     * Вспомогательный метод для отправки HTTP response
+     * @param rcode - код http ответов
+     * @param response - ответ от Сервера клиенту
+     * @param exchange - объект HttpExchange
+     * @throws IOException
+     */
+    private static void sendResponse(int rcode, String response, HttpExchange exchange) throws IOException {
+        exchange.sendResponseHeaders(rcode, response.length());
+        OutputStream os = exchange.getResponseBody();
+        os.write(response.getBytes());
+        os.flush();
+        os.close();
+    }
 }
